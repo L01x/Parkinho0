@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="pt-BR" class="h-full bg-[#0a0a0f]">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Parkinho – Estacionamento de Ideias</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ['Inter', 'sans-serif'],
+            },
+            colors: {
+              neon: {
+                blue: '#3b82f6',
+                purple: '#8b5cf6',
+                pink: '#ec4899',
+                orange: '#f97316',
+                yellow: '#eab308',
+              },
+              bg: {
+                primary: '#0a0a0f',
+                secondary: '#13131a',
+                tertiary: '#1a1a24',
+              },
+              border: {
+                DEFAULT: '#27272a',
+              }
+            }
+          }
+        }
+      }
+    </script>
+    <script>
+      // Mock Database SDK (LocalStorage)
+      window.dataSdk = {
+        init: (cb) => {
+          const load = () => {
+            try {
+                const data = JSON.parse(localStorage.getItem('parkinho_data') || '[]');
+                cb(data);
+            } catch(e) { cb([]) }
+          };
+          
+          window.addEventListener('storage', (e) => {
+              if (e.key === 'parkinho_data') load();
+          });
+          
+          // Monkey patch setItem to trigger events in same tab
+          const originalSetItem = localStorage.setItem;
+          localStorage.setItem = function(key) {
+            originalSetItem.apply(this, arguments);
+            if (key === 'parkinho_data') load();
+          };
+          
+          load();
+        },
+        create: async (item) => {
+           await new Promise(r => setTimeout(r, 300)); // Fake latency
+           const data = JSON.parse(localStorage.getItem('parkinho_data') || '[]');
+           const newItem = { ...item, __backendId: Date.now().toString() };
+           data.push(newItem);
+           localStorage.setItem('parkinho_data', JSON.stringify(data));
+           return { isOk: true, data: newItem };
+        },
+        update: async (item) => {
+           await new Promise(r => setTimeout(r, 300));
+           const data = JSON.parse(localStorage.getItem('parkinho_data') || '[]');
+           const idx = data.findIndex(i => i.__backendId === item.__backendId);
+           if(idx === -1) return { isOk: false };
+           data[idx] = item;
+           localStorage.setItem('parkinho_data', JSON.stringify(data));
+           return { isOk: true };
+        },
+        delete: async (id) => {
+            const data = JSON.parse(localStorage.getItem('parkinho_data') || '[]');
+            const newData = data.filter(i => i.__backendId !== id);
+            localStorage.setItem('parkinho_data', JSON.stringify(newData));
+            return { isOk: true };
+        }
+      };
+    </script>
+    
+  <script type="importmap">
+{
+  "imports": {
+    "react/": "https://esm.sh/react@^19.2.3/",
+    "react": "https://esm.sh/react@^19.2.3",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
+    "lucide-react": "https://esm.sh/lucide-react@^0.561.0"
+  }
+}
+</script>
+<link rel="stylesheet" href="/index.css">
+</head>
+  <body class="h-full text-white overflow-hidden">
+    <div id="root" class="h-full"></div>
+  <script type="module" src="/index.tsx"></script>
+</body>
+</html>
