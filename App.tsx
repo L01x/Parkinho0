@@ -89,56 +89,72 @@ const App = () => {
   };
 
   const executeSave = async (targetStatus: IdeaStatus) => {
-    if (!formAuthor || !formTitle) return showToast("Preencha título e autor", 'error');
+    try {
+      if (!formAuthor?.trim() || !formTitle?.trim()) {
+        return showToast("Preencha título e autor", 'error');
+      }
 
-    const newIdea: Partial<Idea> = {
-        idea_name: formTitle,
-        idea_author: formAuthor,
-        idea_status: targetStatus,
-        idea_drawing_data: JSON.stringify(currentShapes),
-        idea_thumbnail_data: currentThumbnail,
-        idea_created_at: new Date().toISOString(),
-        idea_is_favorite: false,
-        idea_order: 0,
-        idea_tags: '',
-        idea_folder_id: '' 
-    };
+      const newIdea: Partial<Idea> = {
+          idea_name: formTitle.trim(),
+          idea_author: formAuthor.trim(),
+          idea_status: targetStatus,
+          idea_drawing_data: JSON.stringify(currentShapes),
+          idea_thumbnail_data: currentThumbnail,
+          idea_created_at: new Date().toISOString(),
+          idea_is_favorite: false,
+          idea_order: 0,
+          idea_tags: '',
+          idea_folder_id: '' 
+      };
 
-    const result = await saveIdea(newIdea);
-    
-    if (result.isOk) {
-        setSaveModalOpen(false);
-        setSubmitModalOpen(false);
-        setFormTitle('');
-        setFormAuthor('');
-        
-        if (targetStatus === 'parkinho') {
-            // Stay on canvas but clear it
-            showToast('Ideia enviada para o Parkinho!', 'success');
-            setClearCanvasTrigger(prev => prev + 1);
-        } else {
-            showToast('Rascunho salvo!', 'success');
-        }
-    } else {
-        showToast("Erro ao salvar: " + (result.error?.message || "Erro desconhecido"), 'error');
+      const result = await saveIdea(newIdea);
+      
+      if (result.isOk) {
+          // Fetch fresh data or update local state
+          setIdeas(prev => [...prev, result.data]);
+          
+          setSaveModalOpen(false);
+          setSubmitModalOpen(false);
+          setFormTitle('');
+          setFormAuthor('');
+          setCurrentShapes([]);
+          setCurrentThumbnail('');
+          
+          if (targetStatus === 'parkinho') {
+              // Clear canvas
+              showToast('Ideia enviada para o Parkinho!', 'success');
+              setClearCanvasTrigger(prev => prev + 1);
+          } else {
+              showToast('Rascunho salvo!', 'success');
+          }
+      } else {
+          showToast("Erro ao salvar: " + (result.error?.message || "Erro desconhecido"), 'error');
+      }
+    } catch (err) {
+        showToast("Erro inesperado ao salvar.", 'error');
     }
   };
 
   const moveToBacklog = async (idea: Idea) => {
-      // Directly move without native confirm to avoid UI blocking/issues
-      // Find max order to put it at the end
-      const maxOrder = ideas.filter(i => ['backlog', 'analyzing', 'approved', 'rejected'].includes(i.idea_status)).reduce((max, i) => Math.max(max, i.idea_order || 0), 0);
-      
-      const res = await updateIdea({
-          ...idea,
-          idea_status: 'backlog',
-          idea_order: maxOrder + 1
-      });
+      try {
+          const maxOrder = ideas.filter(i => ['backlog', 'analyzing', 'approved', 'rejected'].includes(i.idea_status)).reduce((max, i) => Math.max(max, i.idea_order || 0), 0);
+          
+          const updatedIdea = {
+              ...idea,
+              idea_status: 'backlog' as IdeaStatus,
+              idea_order: maxOrder + 1
+          };
+          
+          const res = await updateIdea(updatedIdea);
 
-      if (res.isOk) {
-          showToast(`"${idea.idea_name}" movido para o Backlog!`, 'success');
-      } else {
-          showToast('Erro ao mover ideia.', 'error');
+          if (res.isOk) {
+              setIdeas(prev => prev.map(i => i.__backendId === idea.__backendId ? updatedIdea : i));
+              showToast(`"${idea.idea_name}" movido para o Backlog!`, 'success');
+          } else {
+              showToast('Erro ao mover ideia.', 'error');
+          }
+      } catch (err) {
+          showToast('Erro ao processar movimento.', 'error');
       }
   };
 
@@ -150,30 +166,40 @@ const App = () => {
 
   const handleDrop = async (e: React.DragEvent, targetId: string) => {
       e.preventDefault();
-      const draggedId = e.dataTransfer.getData('text/plain');
-      if (draggedId === targetId) return;
+      try {
+          const draggedId = e.dataTransfer.getData('text/plain');
+          if (draggedId === targetId) return;
 
-      const items = [...ideas];
-      const draggedIndex = items.findIndex(i => i.__backendId === draggedId);
-      const targetIndex = items.findIndex(i => i.__backendId === targetId);
-      
-      if (draggedIndex === -1 || targetIndex === -1) return;
+          const items = [...ideas];
+          const draggedIndex = items.findIndex(i => i.__backendId === draggedId);
+          const targetIndex = items.findIndex(i => i.__backendId === targetId);
+          
+          if (draggedIndex === -1 || targetIndex === -1) return;
 
-      // Reorder locally first for UI
-      const [removed] = items.splice(draggedIndex, 1);
-      items.splice(targetIndex, 0, removed);
-      
-      // Update orders
-      const updates = items.map((item, index) => ({
-          ...item,
-          idea_order: index
-      }));
+          // Reorder locally first for UI
+          const [removed] = items.splice(draggedIndex, 1);
+          items.splice(targetIndex, 0, removed);
+          
+          // Update orders
+          const updates = items.map((item, index) => ({
+              ...item,
+              idea_order: index
+          }));
 
-      // Optimistic update
-      setIdeas(updates);
+          // Optimistic update
+          setIdeas(updates);
 
-      for (const item of updates) {
-          await updateIdea(item);
+          let hasError = false;
+          for (const item of updates) {
+              const res = await updateIdea(item);
+              if (!res.isOk) hasError = true;
+          }
+          
+          if (hasError) {
+              showToast('Erro ao reordenar algumas ideias.', 'error');
+          }
+      } catch (err) {
+          showToast('Erro ao processar reordenação.', 'error');
       }
   };
 
@@ -190,14 +216,22 @@ const App = () => {
   };
 
   const saveEdit = async () => {
-      if (!editingIdea) return;
-      const res = await updateIdea(editingIdea);
-      if (res.isOk) {
-          showToast('Ideia atualizada!', 'success');
-          setEditModalOpen(false);
-          setEditingIdea(null);
-      } else {
-          showToast('Erro ao atualizar.', 'error');
+      try {
+          if (!editingIdea) return;
+          if (!editingIdea.idea_name?.trim() || !editingIdea.idea_author?.trim()) {
+              return showToast('Título e autor são obrigatórios.', 'error');
+          }
+          const res = await updateIdea(editingIdea);
+          if (res.isOk) {
+              setIdeas(prev => prev.map(i => i.__backendId === editingIdea.__backendId ? editingIdea : i));
+              showToast('Ideia atualizada!', 'success');
+              setEditModalOpen(false);
+              setEditingIdea(null);
+          } else {
+              showToast('Erro ao atualizar: ' + (res.error?.message || 'erro desconhecido'), 'error');
+          }
+      } catch (err) {
+          showToast('Erro ao processar atualização.', 'error');
       }
   };
 
@@ -338,7 +372,12 @@ const App = () => {
                                 idea={idea} 
                                 onMoveToBacklog={moveToBacklog}
                                 onViewImage={openViewImageModal}
-                                onFavorite={async (i) => updateIdea({...i, idea_is_favorite: !i.idea_is_favorite})}
+                                onFavorite={async (i) => {
+                                    const res = await updateIdea({...i, idea_is_favorite: !i.idea_is_favorite});
+                                    if (res.isOk) {
+                                        setIdeas(prev => prev.map(idea => idea.__backendId === i.__backendId ? {...i, idea_is_favorite: !i.idea_is_favorite} : idea));
+                                    }
+                                }}
                                 folderName={folders.find(f => f.__backendId === idea.idea_folder_id)?.folder_name}
                             />
                         ))}

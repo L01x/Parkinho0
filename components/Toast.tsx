@@ -12,7 +12,7 @@ export const Toast: React.FC<ToastProps> = ({ message, type, onClose }) => {
   useEffect(() => {
     const timer = setTimeout(onClose, 3000);
     return () => clearTimeout(timer);
-  }, [onClose]);
+  }, [onClose, message]);
 
   const colors = {
     success: 'border-green-500 text-green-400 bg-bg-secondary shadow-[0_0_20px_rgba(34,197,94,0.3)]',

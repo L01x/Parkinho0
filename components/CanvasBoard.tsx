@@ -34,8 +34,8 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [isSpacePressed, setIsSpacePressed] = useState(false);
 
-  // Text Input State
-  const [textInput, setTextInput] = useState<{ x: number; y: number; text: string } | null>(null);
+  // Text Input State (x,y in world/device pixels; screenX/screenY in CSS px for DOM positioning)
+  const [textInput, setTextInput] = useState<{ x: number; y: number; text: string; screenX?: number; screenY?: number } | null>(null);
 
   // -- Refs for Logic --
   const isDrawing = useRef(false);
@@ -44,6 +44,7 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
   const currentPath = useRef<Point[]>([]);
   const startPoint = useRef<Point | null>(null);
   const currentShapeId = useRef<string | null>(null);
+  const rafId = useRef<number | null>(null);  // For throttling redraws
 
   // -- Effects --
 
@@ -73,8 +74,7 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
     const rect = canvasRef.current.getBoundingClientRect();
     const clientX = 'touches' in e ? (e as any).touches[0].clientX : (e as React.MouseEvent).clientX;
     const clientY = 'touches' in e ? (e as any).touches[0].clientY : (e as React.MouseEvent).clientY;
-    
-    // Return relative to canvas element (0,0 is top-left of canvas DOM)
+    // Return CSS pixels relative to canvas (do NOT multiply by DPR here)
     return {
         x: clientX - rect.left,
         y: clientY - rect.top
@@ -96,6 +96,17 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
     return () => resizeObserver.disconnect();
   }, [containerRef]);
 
+  // Ensure canvas sized correctly on mount and when window resizes
+  useEffect(() => {
+    handleResize();
+    const onWin = () => handleResize();
+    window.addEventListener('resize', onWin);
+    return () => {
+        window.removeEventListener('resize', onWin);
+        if (rafId.current !== null) cancelAnimationFrame(rafId.current);
+    };
+  }, []);
+
   const handleResize = () => {
     if (!containerRef.current || !canvasRef.current) return;
     const container = containerRef.current;
@@ -104,11 +115,17 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
     // Match canvas pixel size to display size
     const width = container.clientWidth;
     const height = container.clientHeight;
-    
+    const dpr = window.devicePixelRatio || 1;
+    const targetWidth = Math.max(1, Math.floor(width * dpr));
+    const targetHeight = Math.max(1, Math.floor(height * dpr));
+
     // Avoid resetting if size hasn't changed to prevent flicker
-    if (canvas.width !== width || canvas.height !== height) {
-        canvas.width = width;
-        canvas.height = height;
+    if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+        canvas.width = targetWidth;
+        canvas.height = targetHeight;
+        // Keep CSS size in CSS pixels
+        canvas.style.width = `${width}px`;
+        canvas.style.height = `${height}px`;
         // Redraw immediately after resize
         requestAnimationFrame(() => redrawAll(shapes, scale, offset));
     }
@@ -132,8 +149,10 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    // Apply Zoom/Pan Transform
-    ctx.setTransform(currentScale, 0, 0, currentScale, currentOffset.x, currentOffset.y);
+    // Account for devicePixelRatio when applying transforms so world units map correctly
+    const dpr = window.devicePixelRatio || 1;
+    // Transform: map world units -> device pixels: dpr * currentScale
+    ctx.setTransform(dpr * currentScale, 0, 0, dpr * currentScale, currentOffset.x * dpr, currentOffset.y * dpr);
 
     shapesToDraw.forEach(shape => drawShape(ctx, shape));
   };
@@ -192,6 +211,9 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
   };
 
   const startInteraction = (e: React.MouseEvent | React.TouchEvent) => {
+    if ((e as any).touches) {
+        try { (e as React.TouchEvent).preventDefault(); } catch {}
+    }
     const coords = getCoords(e);
     // World coordinates for drawing
     const worldCoords = screenToWorld(coords.x, coords.y);
@@ -205,10 +227,11 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
     }
 
     if (currentTool === 'text') {
-        // Place text input at World Coordinates but we need Screen Coords for the input element style
-        // We will store World Coords for the shape, and calculate screen coords for UI
-        setTextInput({ x: worldCoords.x, y: worldCoords.y, text: '' });
-        return;
+      // Place text input at World Coordinates and store screen coords (CSS px) for DOM positioning
+      const screenX = coords.x;
+      const screenY = coords.y;
+      setTextInput({ x: worldCoords.x, y: worldCoords.y, text: '', screenX, screenY });
+      return;
     }
 
     isDrawing.current = true;
@@ -225,7 +248,11 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
   };
 
   const moveInteraction = (e: React.MouseEvent | React.TouchEvent) => {
-    const coords = getCoords(e); // Screen coords
+    if ((e as any).touches) {
+        // prevent scrolling on touch move when interacting with canvas
+        try { (e as React.TouchEvent).preventDefault(); } catch {}
+    }
+    const coords = getCoords(e); // CSS pixel coords
     
     if (isPanning.current) {
         const deltaX = coords.x - lastMousePos.current.x;
@@ -244,49 +271,69 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
     if (currentTool === 'pen' || currentTool === 'eraser') {
       currentPath.current.push(worldCoords);
       
-      // We redraw everything + current path to show preview
-      redrawAll(shapes, scale, offset);
-      
-      // Draw current path on top
-      ctx.setTransform(scale, 0, 0, scale, offset.x, offset.y);
-      ctx.lineWidth = currentTool === 'eraser' ? currentThickness * 4 : currentThickness;
-      ctx.strokeStyle = currentTool === 'eraser' ? '#ffffff' : currentColor;
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      
-      ctx.beginPath();
-      // Optimization: only draw last few segments if path is long? 
-      // For now, drawing whole path ensures smoothness with transform
-      if (currentPath.current.length > 1) {
-          ctx.moveTo(currentPath.current[0].x, currentPath.current[0].y);
-          for(let i=1; i<currentPath.current.length; i++) {
-              ctx.lineTo(currentPath.current[i].x, currentPath.current[i].y);
-          }
+      // Throttle redraws with requestAnimationFrame
+      if (rafId.current !== null) {
+        cancelAnimationFrame(rafId.current);
       }
-      ctx.stroke();
+      
+      rafId.current = requestAnimationFrame(() => {
+        redrawAll(shapes, scale, offset);
+        
+        // Draw current path on top
+        const dpr = window.devicePixelRatio || 1;
+        ctx.setTransform(dpr * scale, 0, 0, dpr * scale, offset.x * dpr, offset.y * dpr);
+        ctx.lineWidth = currentTool === 'eraser' ? currentThickness * 4 : currentThickness;
+        ctx.strokeStyle = currentTool === 'eraser' ? '#ffffff' : currentColor;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        
+        ctx.beginPath();
+        if (currentPath.current.length > 1) {
+            ctx.moveTo(currentPath.current[0].x, currentPath.current[0].y);
+            for(let i=1; i<currentPath.current.length; i++) {
+                ctx.lineTo(currentPath.current[i].x, currentPath.current[i].y);
+            }
+        }
+        ctx.stroke();
+        rafId.current = null;
+      });
 
     } else {
-        // Shape preview
-        redrawAll(shapes, scale, offset);
-        ctx.setTransform(scale, 0, 0, scale, offset.x, offset.y);
-        ctx.strokeStyle = currentColor;
-        ctx.lineWidth = currentThickness;
-        
-        if (currentTool === 'rectangle' && startPoint.current) {
-            const w = worldCoords.x - startPoint.current.x;
-            const h = worldCoords.y - startPoint.current.y;
-            ctx.strokeRect(startPoint.current.x, startPoint.current.y, w, h);
-        } else if (currentTool === 'circle' && startPoint.current) {
-             const r = Math.sqrt(Math.pow(worldCoords.x - startPoint.current.x, 2) + Math.pow(worldCoords.y - startPoint.current.y, 2));
-            ctx.beginPath();
-            ctx.arc(startPoint.current.x, startPoint.current.y, r, 0, 2 * Math.PI);
-            ctx.stroke();
+        // Shape preview - also throttled
+        if (rafId.current !== null) {
+          cancelAnimationFrame(rafId.current);
         }
+        
+        rafId.current = requestAnimationFrame(() => {
+          redrawAll(shapes, scale, offset);
+          const dpr = window.devicePixelRatio || 1;
+          ctx.setTransform(dpr * scale, 0, 0, dpr * scale, offset.x * dpr, offset.y * dpr);
+          ctx.strokeStyle = currentColor;
+          ctx.lineWidth = currentThickness;
+          
+          if (currentTool === 'rectangle' && startPoint.current) {
+              const w = worldCoords.x - startPoint.current.x;
+              const h = worldCoords.y - startPoint.current.y;
+              ctx.strokeRect(startPoint.current.x, startPoint.current.y, w, h);
+          } else if (currentTool === 'circle' && startPoint.current) {
+               const r = Math.sqrt(Math.pow(worldCoords.x - startPoint.current.x, 2) + Math.pow(worldCoords.y - startPoint.current.y, 2));
+              ctx.beginPath();
+              ctx.arc(startPoint.current.x, startPoint.current.y, r, 0, 2 * Math.PI);
+              ctx.stroke();
+          }
+          rafId.current = null;
+        });
     }
   };
 
   const stopInteraction = (e: React.MouseEvent | React.TouchEvent) => {
     isPanning.current = false;
+    
+    // Cancel any pending redraw
+    if (rafId.current !== null) {
+      cancelAnimationFrame(rafId.current);
+      rafId.current = null;
+    }
     
     if (!isDrawing.current) return;
     isDrawing.current = false;
@@ -493,8 +540,10 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
                         onBlur={() => handleTextInputKeyDown({ key: 'Enter' } as any)}
                         style={{
                             position: 'absolute',
-                            left: textInput.x * scale + offset.x,
-                            top: textInput.y * scale + offset.y,
+                            // Use stored CSS screen coords when available; otherwise compute from world coords (CSS px)
+                            left: (typeof textInput.screenX === 'number' ? textInput.screenX : (textInput.x * scale + offset.x)),
+                            top: (typeof textInput.screenY === 'number' ? textInput.screenY : (textInput.y * scale + offset.y)),
+                            // fontSize in CSS px (visual match to canvas at current scale)
                             fontSize: `${currentThickness * 6 * scale}px`,
                             color: currentColor,
                             fontFamily: 'Inter',
