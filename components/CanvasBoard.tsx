@@ -72,8 +72,19 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
   const getCoords = (e: React.MouseEvent | React.TouchEvent | MouseEvent): Point => {
     if (!canvasRef.current) return { x: 0, y: 0 };
     const rect = canvasRef.current.getBoundingClientRect();
-    const clientX = 'touches' in e ? (e as any).touches[0].clientX : (e as React.MouseEvent).clientX;
-    const clientY = 'touches' in e ? (e as any).touches[0].clientY : (e as React.MouseEvent).clientY;
+    let clientX: number, clientY: number;
+    
+    if ('touches' in e) {
+        // For touch events, only use first touch
+        const touch = (e as any).touches?.[0];
+        if (!touch) return { x: 0, y: 0 };
+        clientX = touch.clientX;
+        clientY = touch.clientY;
+    } else {
+        clientX = (e as React.MouseEvent).clientX;
+        clientY = (e as React.MouseEvent).clientY;
+    }
+    
     // Return CSS pixels relative to canvas (do NOT multiply by DPR here)
     return {
         x: clientX - rect.left,
@@ -179,7 +190,7 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
       ctx.arc(shape.x, shape.y, shape.radius, 0, Math.PI * 2);
       ctx.stroke();
     } else if (shape.type === 'text') {
-      ctx.font = `${shape.thickness * 6}px Inter`;
+      ctx.font = `${Math.max(8, shape.thickness * 6)}px Inter`;
       ctx.textBaseline = 'top';
       ctx.fillText(shape.text, shape.x, shape.y);
     }
@@ -211,8 +222,14 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
   };
 
   const startInteraction = (e: React.MouseEvent | React.TouchEvent) => {
-    if ((e as any).touches) {
-        try { (e as React.TouchEvent).preventDefault(); } catch {}
+    if ('touches' in e) {
+        e.preventDefault();
+        // Ignore if multiple touches (two-finger gesture)
+        if ((e as any).touches.length > 1) {
+            isDrawing.current = false;
+            isPanning.current = false;
+            return;
+        }
     }
     const coords = getCoords(e);
     // World coordinates for drawing
@@ -248,9 +265,12 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
   };
 
   const moveInteraction = (e: React.MouseEvent | React.TouchEvent) => {
-    if ((e as any).touches) {
-        // prevent scrolling on touch move when interacting with canvas
-        try { (e as React.TouchEvent).preventDefault(); } catch {}
+    if ('touches' in e) {
+        e.preventDefault();
+        // Ignore if multiple touches
+        if ((e as any).touches.length > 1) {
+            return;
+        }
     }
     const coords = getCoords(e); // CSS pixel coords
     
@@ -327,6 +347,11 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
   };
 
   const stopInteraction = (e: React.MouseEvent | React.TouchEvent) => {
+    if ('touches' in e && (e as any).touches.length > 0) {
+        // Still have fingers on screen (multi-touch), don't stop drawing
+        return;
+    }
+    
     isPanning.current = false;
     
     // Cancel any pending redraw
@@ -368,10 +393,20 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
     }
 
     if (newShape) {
-        setShapes(prev => [...prev, newShape!]);
+        setShapes(prev => {
+          const updated = [...prev, newShape!];
+          // Immediately redraw to ensure shape is visible
+          requestAnimationFrame(() => redrawAll(updated, scale, offset));
+          return updated;
+        });
     } else {
         redrawAll(shapes, scale, offset); // Clear preview
     }
+    
+    // Reset drawing state
+    currentPath.current = [];
+    startPoint.current = null;
+    currentShapeId.current = null;
   };
 
   // -- Text Input Logic --
@@ -387,7 +422,11 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
                   color: currentColor,
                   thickness: currentThickness
               };
-              setShapes(prev => [...prev, newShape]);
+              setShapes(prev => {
+                const updated = [...prev, newShape];
+                requestAnimationFrame(() => redrawAll(updated, scale, offset));
+                return updated;
+              });
           }
           setTextInput(null);
       } else if (e.key === 'Escape') {
@@ -403,13 +442,24 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
     const handleKeyUp = (e: KeyboardEvent) => {
         if (e.code === 'Space') setIsSpacePressed(false);
     };
+    
+    // Handle touch end globally to catch finger lifts outside canvas
+    const handleTouchEnd = (e: TouchEvent) => {
+        if (isDrawing.current) {
+            stopInteraction(e as any);
+        }
+    };
+    
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('touchend', handleTouchEnd);
+    
     return () => {
         window.removeEventListener('keydown', handleKeyDown);
         window.removeEventListener('keyup', handleKeyUp);
+        window.removeEventListener('touchend', handleTouchEnd);
     };
-  }, []);
+  }, [isDrawing.current, shapes, scale, offset, currentTool, currentColor, currentThickness]);
 
   const clearCanvas = () => {
       if(confirm('Tem certeza que deseja limpar o quadro?')) {
@@ -514,7 +564,7 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
            </div>
 
           {/* Canvas Container */}
-          <div className="flex-1 bg-bg-primary relative overflow-hidden touch-none" ref={containerRef}>
+          <div className="flex-1 bg-bg-primary relative overflow-hidden select-none" ref={containerRef} style={{ touchAction: 'none' }}>
               <div className="w-full h-full cursor-crosshair relative z-10"
                    onWheel={handleWheel}
               >
@@ -540,21 +590,24 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
                         onBlur={() => handleTextInputKeyDown({ key: 'Enter' } as any)}
                         style={{
                             position: 'absolute',
-                            // Use stored CSS screen coords when available; otherwise compute from world coords (CSS px)
-                            left: (typeof textInput.screenX === 'number' ? textInput.screenX : (textInput.x * scale + offset.x)),
-                            top: (typeof textInput.screenY === 'number' ? textInput.screenY : (textInput.y * scale + offset.y)),
+                            // Use stored CSS screen coords for positioning
+                            left: `${textInput.screenX || 0}px`,
+                            top: `${textInput.screenY || 0}px`,
                             // fontSize in CSS px (visual match to canvas at current scale)
-                            fontSize: `${currentThickness * 6 * scale}px`,
+                            fontSize: `${Math.max(12, currentThickness * 6 * scale)}px`,
                             color: currentColor,
                             fontFamily: 'Inter',
-                            background: 'transparent',
-                            border: '1px dashed #3b82f6',
+                            background: 'rgba(10, 10, 15, 0.9)',
+                            border: '2px dashed #3b82f6',
                             outline: 'none',
-                            padding: 0,
+                            padding: '4px 8px',
                             margin: 0,
-                            minWidth: '100px'
+                            minWidth: '120px',
+                            maxWidth: '400px',
+                            borderRadius: '4px',
+                            zIndex: 30,
+                            boxShadow: '0 0 20px rgba(59, 130, 246, 0.4)'
                         }}
-                        className="shadow-xl"
                         placeholder="Digite..."
                       />
                   )}
