@@ -42,7 +42,7 @@ export interface TextShape extends BaseShape {
 
 export type Shape = PathShape | RectangleShape | CircleShape | TextShape;
 
-export type Tool = 'pen' | 'eraser' | 'text' | 'rectangle' | 'circle' | 'hand';
+export type Tool = 'pen' | 'eraser' | 'text' | 'rectangle' | 'circle' | 'hand' | 'select';
 
 // Added 'parkinho' as a status
 export type IdeaStatus = 'draft' | 'parkinho' | 'backlog' | 'analyzing' | 'approved' | 'rejected';

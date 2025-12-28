@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useLayoutEffect, useCallback } from 'react';
 import { Shape, Tool, Point, Idea } from '../types';
-import { Maximize, Minimize, Share, Eraser, Pen, Type, Square, Circle as CircleIcon, Trash2, Hand, ZoomIn, ZoomOut, RotateCcw, Undo2, Redo2 } from 'lucide-react';
+import { Maximize, Minimize, Share, Eraser, Pen, Type, Square, Circle as CircleIcon, Trash2, Hand, ZoomIn, ZoomOut, RotateCcw, Undo2, Redo2, MousePointer2 } from 'lucide-react';
 import { COLORS, THICKNESS_OPTIONS } from '../constants';
 
 interface CanvasBoardProps {
@@ -85,6 +85,11 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
     screenY?: number;
     id?: string;
   } | null>(null);
+
+  // Selection State
+  const [selectedShapeId, setSelectedShapeId] = useState<string | null>(null);
+  const isMovingShape = useRef(false);
+  const moveStartOffset = useRef<Point>({ x: 0, y: 0 });
 
   // -- Refs for Logic --
   const isDrawing = useRef(false);
@@ -295,7 +300,57 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
     ctx.imageSmoothingQuality = 'high';
 
     shapesToDraw.forEach(shape => drawShape(ctx, shape));
-  }, []);
+    
+    // Draw selection indicator if shape is selected
+    if (selectedShapeId) {
+      const selectedShape = shapesToDraw.find(s => s.id === selectedShapeId);
+      if (selectedShape) {
+        // Draw selection indicator inline
+        ctx.save();
+        ctx.strokeStyle = '#3b82f6';
+        ctx.fillStyle = 'rgba(59, 130, 246, 0.1)';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([5, 5]);
+        
+        if (selectedShape.type === 'path') {
+          if (selectedShape.points.length >= 2) {
+            const xs = selectedShape.points.map(p => p.x);
+            const ys = selectedShape.points.map(p => p.y);
+            const minX = Math.min(...xs) - selectedShape.thickness / 2;
+            const maxX = Math.max(...xs) + selectedShape.thickness / 2;
+            const minY = Math.min(...ys) - selectedShape.thickness / 2;
+            const maxY = Math.max(...ys) + selectedShape.thickness / 2;
+            ctx.fillRect(minX, minY, maxX - minX, maxY - minY);
+            ctx.strokeRect(minX, minY, maxX - minX, maxY - minY);
+          }
+        } else if (selectedShape.type === 'rectangle') {
+          const x = Math.min(selectedShape.x, selectedShape.x + selectedShape.width);
+          const y = Math.min(selectedShape.y, selectedShape.y + selectedShape.height);
+          const w = Math.abs(selectedShape.width);
+          const h = Math.abs(selectedShape.height);
+          ctx.fillRect(x, y, w, h);
+          ctx.strokeRect(x, y, w, h);
+        } else if (selectedShape.type === 'circle') {
+          ctx.beginPath();
+          ctx.arc(selectedShape.x, selectedShape.y, selectedShape.radius + selectedShape.thickness / 2, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+        } else if (selectedShape.type === 'text') {
+          const ctx2 = canvasRef.current?.getContext('2d');
+          if (ctx2) {
+            ctx2.font = `${Math.max(8, selectedShape.thickness * 6)}px Inter, sans-serif`;
+            const metrics = ctx2.measureText(selectedShape.text);
+            const textWidth = metrics.width;
+            const textHeight = selectedShape.thickness * 6;
+            ctx.fillRect(selectedShape.x, selectedShape.y, textWidth, textHeight);
+            ctx.strokeRect(selectedShape.x, selectedShape.y, textWidth, textHeight);
+          }
+        }
+        
+        ctx.restore();
+      }
+    }
+  }, [selectedShapeId]);
 
   const drawShape = (ctx: CanvasRenderingContext2D, shape: Shape) => {
     ctx.strokeStyle = shape.color;
@@ -327,6 +382,63 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
       ctx.fillText(shape.text, shape.x, shape.y);
     }
   };
+
+  // Hit detection - check if point is inside shape
+  const isPointInShape = useCallback((point: Point, shape: Shape, tolerance: number = 5): boolean => {
+    if (shape.type === 'path') {
+      // Check if point is near any segment of the path
+      for (let i = 0; i < shape.points.length - 1; i++) {
+        const p1 = shape.points[i];
+        const p2 = shape.points[i + 1];
+        const dx = p2.x - p1.x;
+        const dy = p2.y - p1.y;
+        const length = Math.sqrt(dx * dx + dy * dy);
+        if (length === 0) continue;
+        
+        const t = Math.max(0, Math.min(1, ((point.x - p1.x) * dx + (point.y - p1.y) * dy) / (length * length)));
+        const proj = {
+          x: p1.x + t * dx,
+          y: p1.y + t * dy
+        };
+        const dist = Math.sqrt((point.x - proj.x) ** 2 + (point.y - proj.y) ** 2);
+        if (dist <= tolerance + shape.thickness / 2) return true;
+      }
+      return false;
+    } else if (shape.type === 'rectangle') {
+      const minX = Math.min(shape.x, shape.x + shape.width);
+      const maxX = Math.max(shape.x, shape.x + shape.width);
+      const minY = Math.min(shape.y, shape.y + shape.height);
+      const maxY = Math.max(shape.y, shape.y + shape.height);
+      return point.x >= minX - tolerance && point.x <= maxX + tolerance &&
+             point.y >= minY - tolerance && point.y <= maxY + tolerance;
+    } else if (shape.type === 'circle') {
+      const dist = Math.sqrt((point.x - shape.x) ** 2 + (point.y - shape.y) ** 2);
+      return dist <= shape.radius + tolerance + shape.thickness / 2;
+    } else if (shape.type === 'text') {
+      // Approximate text bounds
+      const ctx = canvasRef.current?.getContext('2d');
+      if (!ctx) return false;
+      ctx.font = `${Math.max(8, shape.thickness * 6)}px Inter, sans-serif`;
+      const metrics = ctx.measureText(shape.text);
+      const textWidth = metrics.width;
+      const textHeight = shape.thickness * 6;
+      return point.x >= shape.x - tolerance && point.x <= shape.x + textWidth + tolerance &&
+             point.y >= shape.y - tolerance && point.y <= shape.y + textHeight + tolerance;
+    }
+    return false;
+  }, []);
+
+  // Find shape at point (check from end to start for top-most shape)
+  const findShapeAtPoint = useCallback((point: Point): Shape | null => {
+    const shapesToCheck = [...shapesRef.current].reverse(); // Check from top to bottom
+    for (const shape of shapesToCheck) {
+      if (isPointInShape(point, shape)) {
+        return shape;
+      }
+    }
+    return null;
+  }, [isPointInShape]);
+
 
   // -- Interaction Handlers (Pointer Events) --
 
@@ -378,7 +490,40 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
     if (currentTool === 'hand' || isSpacePressed || isMiddleMouse) {
       isPanning.current = true;
       lastPointerPos.current = coords;
+      setSelectedShapeId(null); // Deselect when panning
       return;
+    }
+
+    // Selection tool
+    if (currentTool === 'select') {
+      const shape = findShapeAtPoint(worldCoords);
+      if (shape) {
+        setSelectedShapeId(shape.id);
+        isMovingShape.current = true;
+        // Calculate offset from shape origin to click point
+        if (shape.type === 'path' && shape.points.length > 0) {
+          moveStartOffset.current = {
+            x: worldCoords.x - shape.points[0].x,
+            y: worldCoords.y - shape.points[0].y
+          };
+        } else if (shape.type === 'rectangle' || shape.type === 'text') {
+          moveStartOffset.current = {
+            x: worldCoords.x - shape.x,
+            y: worldCoords.y - shape.y
+          };
+        } else if (shape.type === 'circle') {
+          moveStartOffset.current = {
+            x: worldCoords.x - shape.x,
+            y: worldCoords.y - shape.y
+          };
+        }
+        lastPointerPos.current = coords;
+        return;
+      } else {
+        // Clicked on empty space - deselect
+        setSelectedShapeId(null);
+        return;
+      }
     }
 
     if (currentTool === 'text') {
@@ -436,6 +581,47 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
       const deltaX = coords.x - lastPointerPos.current.x;
       const deltaY = coords.y - lastPointerPos.current.y;
       setOffset(prev => ({ x: prev.x + deltaX, y: prev.y + deltaY }));
+      lastPointerPos.current = coords;
+      return;
+    }
+
+    // Move selected shape
+    if (isMovingShape.current && selectedShapeId) {
+      const shape = shapesRef.current.find(s => s.id === selectedShapeId);
+      if (shape) {
+        const worldCoords = screenToWorld(coords.x, coords.y);
+        const lastWorldCoords = screenToWorld(lastPointerPos.current.x, lastPointerPos.current.y);
+        const deltaX = worldCoords.x - lastWorldCoords.x;
+        const deltaY = worldCoords.y - lastWorldCoords.y;
+        
+        setShapes(prev => {
+          const updated = prev.map(s => {
+            if (s.id === selectedShapeId) {
+              if (s.type === 'path') {
+                return {
+                  ...s,
+                  points: s.points.map(p => ({ x: p.x + deltaX, y: p.y + deltaY }))
+                };
+              } else if (s.type === 'rectangle' || s.type === 'text') {
+                return {
+                  ...s,
+                  x: s.x + deltaX,
+                  y: s.y + deltaY
+                };
+              } else if (s.type === 'circle') {
+                return {
+                  ...s,
+                  x: s.x + deltaX,
+                  y: s.y + deltaY
+                };
+              }
+            }
+            return s;
+          });
+          shapesRef.current = updated;
+          return updated;
+        });
+      }
       lastPointerPos.current = coords;
       return;
     }
@@ -532,6 +718,20 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
     }
     
     isPanning.current = false;
+    
+    // Stop moving shape
+    if (isMovingShape.current) {
+      isMovingShape.current = false;
+      // Save to history when done moving
+      if (selectedShapeId) {
+        setShapes(prev => {
+          const updated = [...prev];
+          addToHistory(updated);
+          return updated;
+        });
+      }
+      return;
+    }
     
     // Cancel any pending redraw
     if (rafId.current !== null) {
@@ -737,6 +937,7 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
       // Clear state
       setShapes([]);
       setTextInput(null);
+      setSelectedShapeId(null);
       
       // Clear undo/redo history
       const emptyHistory = [{ shapes: [], timestamp: Date.now() }];
@@ -800,8 +1001,9 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
           
           {/* Top Bar Controls (Floating) */}
           <div className="absolute top-4 left-4 z-20 flex flex-wrap gap-2 items-center pointer-events-auto select-none">
-             <div className="flex bg-bg-tertiary rounded-lg p-1 border border-border shadow-lg backdrop-blur-sm bg-opacity-90">
+             <div className="flex bg-bg-tertiary rounded-lg p-0.5 sm:p-1 border border-border shadow-lg backdrop-blur-sm bg-opacity-90">
                 {[
+                    { id: 'select', icon: MousePointer2, title: 'Selecionar/Mover' },
                     { id: 'hand', icon: Hand, title: 'Mover (Espaço)' },
                     { id: 'pen', icon: Pen, title: 'Caneta' },
                     { id: 'eraser', icon: Eraser, title: 'Borracha' },
@@ -813,34 +1015,35 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
                         key={tool.id} 
                         onClick={() => { 
                           setCurrentTool(tool.id as Tool); 
-                          setTextInput(null); 
+                          setTextInput(null);
+                          setSelectedShapeId(null); // Deselect when switching tools
                         }} 
-                        className={`p-2 rounded-md transition-all touch-manipulation ${currentTool === tool.id ? 'bg-neon-blue/20 text-neon-blue' : 'text-gray-400 hover:text-white'}`}
+                        className={`p-1.5 sm:p-2 rounded-md transition-all touch-manipulation ${currentTool === tool.id ? 'bg-neon-blue/20 text-neon-blue' : 'text-gray-400 hover:text-white'}`}
                         title={tool.title}
-                        style={{ touchAction: 'manipulation' }}
+                        style={{ touchAction: 'manipulation', minWidth: '36px', minHeight: '36px' }}
                     >
-                        <tool.icon size={20} />
+                        <tool.icon size={18} className="sm:w-5 sm:h-5" />
                     </button>
                 ))}
              </div>
              
-             <div className="flex bg-bg-tertiary rounded-lg p-1.5 border border-border gap-1 shadow-lg backdrop-blur-sm bg-opacity-90">
+             <div className="flex bg-bg-tertiary rounded-lg p-1 sm:p-1.5 border border-border gap-0.5 sm:gap-1 shadow-lg backdrop-blur-sm bg-opacity-90">
                 {COLORS.map(color => (
                     <button 
                       key={color} 
                       onClick={() => setCurrentColor(color)} 
-                      className={`w-6 h-6 rounded-full border-2 transition-transform touch-manipulation ${currentColor === color ? 'border-white scale-110' : 'border-border'}`} 
+                      className={`w-7 h-7 sm:w-6 sm:h-6 rounded-full border-2 transition-transform touch-manipulation ${currentColor === color ? 'border-white scale-110' : 'border-border'}`} 
                       style={{ backgroundColor: color, touchAction: 'manipulation' }}
                     />
                 ))}
              </div>
 
-             <div className="flex bg-bg-tertiary rounded-lg p-1 border border-border shadow-lg backdrop-blur-sm bg-opacity-90">
+             <div className="flex bg-bg-tertiary rounded-lg p-0.5 sm:p-1 border border-border shadow-lg backdrop-blur-sm bg-opacity-90">
                  {THICKNESS_OPTIONS.map(size => (
                      <button 
                        key={size} 
                        onClick={() => setCurrentThickness(size)} 
-                       className={`w-8 h-8 flex items-center justify-center rounded touch-manipulation ${currentThickness === size ? 'bg-neon-blue/20 text-neon-blue' : 'text-gray-400'}`}
+                       className={`w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center rounded touch-manipulation ${currentThickness === size ? 'bg-neon-blue/20 text-neon-blue' : 'text-gray-400'}`}
                        style={{ touchAction: 'manipulation' }}
                      >
                         <div className="bg-current rounded-full" style={{ width: size, height: size }} />
@@ -849,86 +1052,86 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
              </div>
 
              {/* Undo/Redo Buttons */}
-             <div className="flex bg-bg-tertiary rounded-lg p-1 border border-border shadow-lg backdrop-blur-sm bg-opacity-90 gap-1">
+             <div className="flex bg-bg-tertiary rounded-lg p-0.5 sm:p-1 border border-border shadow-lg backdrop-blur-sm bg-opacity-90 gap-0.5 sm:gap-1">
                <button 
                  onClick={undo} 
                  disabled={!canUndo}
-                 className={`p-2 rounded-md transition-all touch-manipulation ${canUndo ? 'text-gray-400 hover:text-white' : 'text-gray-600 cursor-not-allowed'}`}
+                 className={`p-1.5 sm:p-2 rounded-md transition-all touch-manipulation ${canUndo ? 'text-gray-400 hover:text-white' : 'text-gray-600 cursor-not-allowed'}`}
                  title="Desfazer (Ctrl+Z)"
-                 style={{ touchAction: 'manipulation' }}
+                 style={{ touchAction: 'manipulation', minWidth: '36px', minHeight: '36px' }}
                >
-                 <Undo2 size={20} />
+                 <Undo2 size={18} className="sm:w-5 sm:h-5" />
                </button>
                <button 
                  onClick={redo} 
                  disabled={!canRedo}
-                 className={`p-2 rounded-md transition-all touch-manipulation ${canRedo ? 'text-gray-400 hover:text-white' : 'text-gray-600 cursor-not-allowed'}`}
+                 className={`p-1.5 sm:p-2 rounded-md transition-all touch-manipulation ${canRedo ? 'text-gray-400 hover:text-white' : 'text-gray-600 cursor-not-allowed'}`}
                  title="Refazer (Ctrl+Y)"
-                 style={{ touchAction: 'manipulation' }}
+                 style={{ touchAction: 'manipulation', minWidth: '36px', minHeight: '36px' }}
                >
-                 <Redo2 size={20} />
+                 <Redo2 size={18} className="sm:w-5 sm:h-5" />
                </button>
              </div>
              
              <button 
                onClick={() => onSendToParkinho(shapes, getThumbnail())} 
-               className="flex items-center gap-2 px-3 py-2 bg-neon-purple text-white rounded-lg shadow-lg font-bold hover:brightness-110 transition-all touch-manipulation"
+               className="flex items-center gap-1 sm:gap-2 px-2 sm:px-3 py-1.5 sm:py-2 bg-neon-purple text-white rounded-lg shadow-lg font-bold hover:brightness-110 transition-all touch-manipulation text-xs sm:text-sm"
                style={{ touchAction: 'manipulation' }}
              >
-                <Share size={16} /> Enviar p/ Parkinho
+                <Share size={14} className="sm:w-4 sm:h-4" /> <span className="hidden sm:inline">Enviar p/ Parkinho</span><span className="sm:hidden">Enviar</span>
              </button>
              
              <button 
                onClick={clearCanvas} 
-               className="p-2 bg-red-900/50 text-red-200 border border-red-800 rounded-lg shadow-lg hover:bg-red-900 transition-all touch-manipulation" 
+               className="p-1.5 sm:p-2 bg-red-900/50 text-red-200 border border-red-800 rounded-lg shadow-lg hover:bg-red-900 transition-all touch-manipulation" 
                title="Limpar"
-               style={{ touchAction: 'manipulation' }}
+               style={{ touchAction: 'manipulation', minWidth: '36px', minHeight: '36px' }}
              >
-                <Trash2 size={20} />
+                <Trash2 size={18} className="sm:w-5 sm:h-5" />
              </button>
           </div>
 
            {/* Maximize Button - Top Right */}
-           <div className="absolute top-4 right-4 z-20 pointer-events-auto">
+           <div className="absolute top-2 sm:top-4 right-2 sm:right-4 z-20 pointer-events-auto">
                 <button 
                     onClick={onToggleFullscreen} 
-                    className="p-2 bg-bg-tertiary text-neon-blue border border-border rounded-lg shadow-lg hover:text-white transition-all touch-manipulation"
+                    className="p-1.5 sm:p-2 bg-bg-tertiary text-neon-blue border border-border rounded-lg shadow-lg hover:text-white transition-all touch-manipulation"
                     title={isFullscreen ? "Sair do Fullscreen" : "Maximizar"}
-                    style={{ touchAction: 'manipulation' }}
+                    style={{ touchAction: 'manipulation', minWidth: '36px', minHeight: '36px' }}
                 >
-                    {isFullscreen ? <Minimize size={20} /> : <Maximize size={20} />}
+                    {isFullscreen ? <Minimize size={18} className="sm:w-5 sm:h-5" /> : <Maximize size={18} className="sm:w-5 sm:h-5" />}
                 </button>
            </div>
 
            {/* Zoom Controls - Bottom Right */}
-           <div className="absolute bottom-4 right-4 z-20 pointer-events-auto flex flex-col gap-2">
+           <div className="absolute bottom-2 sm:bottom-4 right-2 sm:right-4 z-20 pointer-events-auto flex flex-col gap-1.5 sm:gap-2">
                 <div className="flex flex-col bg-bg-tertiary rounded-lg border border-border shadow-lg overflow-hidden">
                     <button 
                       onClick={() => setScale(s => Math.min(s * 1.2, 5))} 
-                      className="p-2 hover:bg-white/10 text-white touch-manipulation" 
+                      className="p-1.5 sm:p-2 hover:bg-white/10 text-white touch-manipulation" 
                       title="Zoom In"
-                      style={{ touchAction: 'manipulation' }}
+                      style={{ touchAction: 'manipulation', minWidth: '36px', minHeight: '36px' }}
                     >
-                      <ZoomIn size={20} />
+                      <ZoomIn size={18} className="sm:w-5 sm:h-5" />
                     </button>
                     <button 
                       onClick={() => setScale(s => Math.max(s / 1.2, 0.1))} 
-                      className="p-2 hover:bg-white/10 text-white touch-manipulation" 
+                      className="p-1.5 sm:p-2 hover:bg-white/10 text-white touch-manipulation" 
                       title="Zoom Out"
-                      style={{ touchAction: 'manipulation' }}
+                      style={{ touchAction: 'manipulation', minWidth: '36px', minHeight: '36px' }}
                     >
-                      <ZoomOut size={20} />
+                      <ZoomOut size={18} className="sm:w-5 sm:h-5" />
                     </button>
                     <button 
                       onClick={resetView} 
-                      className="p-2 hover:bg-white/10 text-white border-t border-border touch-manipulation" 
+                      className="p-1.5 sm:p-2 hover:bg-white/10 text-white border-t border-border touch-manipulation" 
                       title="Reset View"
-                      style={{ touchAction: 'manipulation' }}
+                      style={{ touchAction: 'manipulation', minWidth: '36px', minHeight: '36px' }}
                     >
-                      <RotateCcw size={16} />
+                      <RotateCcw size={16} className="sm:w-4 sm:h-4" />
                     </button>
                 </div>
-                <div className="bg-bg-tertiary px-2 py-1 rounded text-xs text-center border border-border text-gray-400">
+                <div className="bg-bg-tertiary px-1.5 sm:px-2 py-0.5 sm:py-1 rounded text-[10px] sm:text-xs text-center border border-border text-gray-400">
                     {Math.round(scale * 100)}%
                 </div>
            </div>
