@@ -256,6 +256,13 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
     shapesRef.current = shapes;
   }, [shapes]);
 
+  // Force redraw when selection changes to show/hide selection indicator
+  useEffect(() => {
+    requestAnimationFrame(() => {
+      redrawAll(shapesRef.current, scale, offset);
+    });
+  }, [selectedShapeId, scale, offset]);
+
   useEffect(() => {
     redrawAll(shapes, scale, offset);
   }, [shapes, scale, offset]);
@@ -384,9 +391,24 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
   };
 
   // Hit detection - check if point is inside shape
-  const isPointInShape = useCallback((point: Point, shape: Shape, tolerance: number = 5): boolean => {
+  const isPointInShape = useCallback((point: Point, shape: Shape, tolerance: number = 10): boolean => {
     if (shape.type === 'path') {
+      if (shape.points.length < 2) return false;
+      
+      // First check bounding box for performance
+      const xs = shape.points.map(p => p.x);
+      const ys = shape.points.map(p => p.y);
+      const minX = Math.min(...xs) - tolerance - shape.thickness;
+      const maxX = Math.max(...xs) + tolerance + shape.thickness;
+      const minY = Math.min(...ys) - tolerance - shape.thickness;
+      const maxY = Math.max(...ys) + tolerance + shape.thickness;
+      
+      if (point.x < minX || point.x > maxX || point.y < minY || point.y > maxY) {
+        return false;
+      }
+      
       // Check if point is near any segment of the path
+      const hitTolerance = tolerance + shape.thickness / 2;
       for (let i = 0; i < shape.points.length - 1; i++) {
         const p1 = shape.points[i];
         const p2 = shape.points[i + 1];
@@ -401,16 +423,16 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
           y: p1.y + t * dy
         };
         const dist = Math.sqrt((point.x - proj.x) ** 2 + (point.y - proj.y) ** 2);
-        if (dist <= tolerance + shape.thickness / 2) return true;
+        if (dist <= hitTolerance) return true;
       }
       return false;
     } else if (shape.type === 'rectangle') {
-      const minX = Math.min(shape.x, shape.x + shape.width);
-      const maxX = Math.max(shape.x, shape.x + shape.width);
-      const minY = Math.min(shape.y, shape.y + shape.height);
-      const maxY = Math.max(shape.y, shape.y + shape.height);
-      return point.x >= minX - tolerance && point.x <= maxX + tolerance &&
-             point.y >= minY - tolerance && point.y <= maxY + tolerance;
+      const minX = Math.min(shape.x, shape.x + shape.width) - tolerance;
+      const maxX = Math.max(shape.x, shape.x + shape.width) + tolerance;
+      const minY = Math.min(shape.y, shape.y + shape.height) - tolerance;
+      const maxY = Math.max(shape.y, shape.y + shape.height) + tolerance;
+      return point.x >= minX && point.x <= maxX &&
+             point.y >= minY && point.y <= maxY;
     } else if (shape.type === 'circle') {
       const dist = Math.sqrt((point.x - shape.x) ** 2 + (point.y - shape.y) ** 2);
       return dist <= shape.radius + tolerance + shape.thickness / 2;
@@ -430,7 +452,11 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
 
   // Find shape at point (check from end to start for top-most shape)
   const findShapeAtPoint = useCallback((point: Point): Shape | null => {
-    const shapesToCheck = [...shapesRef.current].reverse(); // Check from top to bottom
+    const currentShapes = shapesRef.current;
+    if (currentShapes.length === 0) return null;
+    
+    // Check from top to bottom (reverse order)
+    const shapesToCheck = [...currentShapes].reverse();
     for (const shape of shapesToCheck) {
       if (isPointInShape(point, shape)) {
         return shape;
@@ -502,9 +528,14 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
         isMovingShape.current = true;
         // Calculate offset from shape origin to click point
         if (shape.type === 'path' && shape.points.length > 0) {
+          // Use center of bounding box for paths
+          const xs = shape.points.map(p => p.x);
+          const ys = shape.points.map(p => p.y);
+          const centerX = (Math.min(...xs) + Math.max(...xs)) / 2;
+          const centerY = (Math.min(...ys) + Math.max(...ys)) / 2;
           moveStartOffset.current = {
-            x: worldCoords.x - shape.points[0].x,
-            y: worldCoords.y - shape.points[0].y
+            x: worldCoords.x - centerX,
+            y: worldCoords.y - centerY
           };
         } else if (shape.type === 'rectangle' || shape.type === 'text') {
           moveStartOffset.current = {
@@ -518,10 +549,14 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
           };
         }
         lastPointerPos.current = coords;
+        // Force redraw to show selection
+        requestAnimationFrame(() => redrawAll(shapesRef.current, scale, offset));
         return;
       } else {
         // Clicked on empty space - deselect
         setSelectedShapeId(null);
+        // Force redraw to remove selection
+        requestAnimationFrame(() => redrawAll(shapesRef.current, scale, offset));
         return;
       }
     }
@@ -594,32 +629,41 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
         const deltaX = worldCoords.x - lastWorldCoords.x;
         const deltaY = worldCoords.y - lastWorldCoords.y;
         
-        setShapes(prev => {
-          const updated = prev.map(s => {
-            if (s.id === selectedShapeId) {
-              if (s.type === 'path') {
-                return {
-                  ...s,
-                  points: s.points.map(p => ({ x: p.x + deltaX, y: p.y + deltaY }))
-                };
-              } else if (s.type === 'rectangle' || s.type === 'text') {
-                return {
-                  ...s,
-                  x: s.x + deltaX,
-                  y: s.y + deltaY
-                };
-              } else if (s.type === 'circle') {
-                return {
-                  ...s,
-                  x: s.x + deltaX,
-                  y: s.y + deltaY
-                };
+        // Throttle updates with requestAnimationFrame
+        if (rafId.current !== null) {
+          cancelAnimationFrame(rafId.current);
+        }
+        
+        rafId.current = requestAnimationFrame(() => {
+          setShapes(prev => {
+            const updated = prev.map(s => {
+              if (s.id === selectedShapeId) {
+                if (s.type === 'path') {
+                  return {
+                    ...s,
+                    points: s.points.map(p => ({ x: p.x + deltaX, y: p.y + deltaY }))
+                  };
+                } else if (s.type === 'rectangle' || s.type === 'text') {
+                  return {
+                    ...s,
+                    x: s.x + deltaX,
+                    y: s.y + deltaY
+                  };
+                } else if (s.type === 'circle') {
+                  return {
+                    ...s,
+                    x: s.x + deltaX,
+                    y: s.y + deltaY
+                  };
+                }
               }
-            }
-            return s;
+              return s;
+            });
+            shapesRef.current = updated;
+            redrawAll(updated, scale, offset);
+            rafId.current = null;
+            return updated;
           });
-          shapesRef.current = updated;
-          return updated;
         });
       }
       lastPointerPos.current = coords;
@@ -1192,7 +1236,13 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
                           stopInteraction(e as any);
                         }
                       }}
-                      className={`block w-full h-full ${isSpacePressed || currentTool === 'hand' ? 'cursor-grab active:cursor-grabbing' : 'cursor-crosshair'}`}
+                      className={`block w-full h-full ${
+                        isSpacePressed || currentTool === 'hand' 
+                          ? 'cursor-grab active:cursor-grabbing' 
+                          : currentTool === 'select' 
+                            ? 'cursor-pointer' 
+                            : 'cursor-crosshair'
+                      }`}
                       style={{ touchAction: 'none' }}
                   />
                   
