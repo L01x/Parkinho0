@@ -99,6 +99,9 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
   
   // Active pointer tracking for multi-touch prevention
   const activePointers = useRef<Map<number, PointerEvent>>(new Map());
+  
+  // Ref to keep latest shapes state for drawing operations
+  const shapesRef = useRef<Shape[]>([]);
 
   // -- Undo/Redo Logic --
   
@@ -242,6 +245,11 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
   }, [shapes, scale, offset]);
 
   // -- Drawing Logic --
+
+  // Update shapes ref whenever shapes change
+  useEffect(() => {
+    shapesRef.current = shapes;
+  }, [shapes]);
 
   useEffect(() => {
     redrawAll(shapes, scale, offset);
@@ -447,7 +455,8 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
       }
       
       rafId.current = requestAnimationFrame(() => {
-        redrawAll(shapes, scale, offset);
+        // Use shapesRef to get the most up-to-date shapes state
+        redrawAll(shapesRef.current, scale, offset);
         
         // Draw current path on top with smoothing
         const dpr = window.devicePixelRatio || 1;
@@ -478,7 +487,8 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
       }
       
       rafId.current = requestAnimationFrame(() => {
-        redrawAll(shapes, scale, offset);
+        // Use shapesRef to get the most up-to-date shapes state
+        redrawAll(shapesRef.current, scale, offset);
         const dpr = window.devicePixelRatio || 1;
         ctx.setTransform(dpr * scale, 0, 0, dpr * scale, offset.x * dpr, offset.y * dpr);
         ctx.strokeStyle = currentColor;
@@ -577,12 +587,14 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({
     if (newShape) {
       setShapes(prev => {
         const updated = [...prev, newShape!];
+        shapesRef.current = updated; // Update ref immediately
         addToHistory(updated);
         requestAnimationFrame(() => redrawAll(updated, scale, offset));
         return updated;
       });
     } else {
-      redrawAll(shapes, scale, offset);
+      // Use shapesRef to ensure we have the latest state
+      redrawAll(shapesRef.current, scale, offset);
     }
     
     // Reset drawing state

@@ -61,3 +61,4 @@ npm run preview
 - Certifique-se de que o servidor está rodando (`npm run dev`)
 - Não abra o arquivo HTML diretamente!
 
+
